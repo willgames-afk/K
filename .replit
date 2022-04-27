@@ -1,0 +1,2 @@
+run="./elm make src/Main.elm && node index.js"
+entrypoint="src/Main.elm"

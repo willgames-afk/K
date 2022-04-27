@@ -1,0 +1,12 @@
+# Elm
+elm
+elm-stuff/
+
+main.js
+index.html
+
+# Mac OS
+.DS_Store
+
+# Nodejs
+node_modules/
