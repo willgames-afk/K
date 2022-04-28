@@ -32,17 +32,37 @@ update msg model =
     UpdateInput newInput ->  {model | input=newInput}
     Compile -> 
         let 
-            maybeParsed = assign model.input
+            maybeParsed = parseProgram model.input
             result = case maybeParsed of
                 Success val _ ->  case validateAssign val of
-                    Ok t -> "Success, returns type " ++ printType t ++ "\n(Result: " ++ printAssign val ++ ")"
+                    Ok t -> "Success- \n\n" ++ printProg val
                     Err e -> "TypeError: " ++ e
                 Error val  -> "Error: " ++ (Tuple.first val) ++ " Around `" ++ (Tuple.second val) ++ "`"
         in
             {model | output = result}
 
+parseProgram: String -> MaybeParsed (List (String, MathExpr))
+parseProgram chars = parseProgram_ chars []
+parseProgram_ chars list =
+    case String.isEmpty (String.trimRight chars) of
+        True -> Success (List.reverse list) ""
+        False -> case assign chars of
+            Success res rem -> parseProgram_ rem (res :: list)
+            Error err -> Error err
 
+printProg:  List (String, MathExpr) -> String
+printProg input =
+    case input of
+    [] -> ""
+    x :: xs -> (printAssign x) ++ "\n" ++ printProg x
+    
 
+validateProg: MaybeParsed List (String, MathExpr) -> List (Result String MType)
+validateProg input = validateProg_ input []
+validateProg_ input outs =
+    case input of
+    [] -> outs
+    x :: xs
 
  --- Basic parsing stuff ---
 
