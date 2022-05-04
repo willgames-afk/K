@@ -34,10 +34,10 @@ update msg model =
         let 
             maybeParsed = parseProgram model.input
             result = case maybeParsed of
-                Success val _ ->  case validateAssign val of
-                    Ok t -> "Success- \n\n" ++ printProg val
-                    Err e -> "TypeError: " ++ e
-                Error val  -> "Error: " ++ (Tuple.first val) ++ " Around `" ++ (Tuple.second val) ++ "`"
+                Success val _ -> let res = printValidateProg val in case Tuple.first res of 
+                    True -> (Tuple.second res) ++ compile val
+                    False -> Tuple.second res
+                Error val  -> "ParseError: " ++ (Tuple.first val) ++ " Around `" ++ (Tuple.second val) ++ "`"
         in
             {model | output = result}
 
@@ -49,20 +49,20 @@ parseProgram_ chars list =
         False -> case assign chars of
             Success res rem -> parseProgram_ rem (res :: list)
             Error err -> Error err
-
-printProg:  List (String, MathExpr) -> String
-printProg input =
-    case input of
-    [] -> ""
-    x :: xs -> (printAssign x) ++ "\n" ++ printProg x
     
 
-validateProg: MaybeParsed List (String, MathExpr) -> List (Result String MType)
-validateProg input = validateProg_ input []
-validateProg_ input outs =
+printValidateProg:  List (String, MathExpr)  -> (Bool, String)
+printValidateProg input = printValidateProg_ input (True,"")
+printValidateProg_ input outs =
     case input of
-    [] -> outs
-    x :: xs
+        [] -> outs 
+        x :: xs -> let valAsn = validateAssign x in -- Result String or MType
+            case valAsn of
+                Err text -> printValidateProg_ xs ((False, (Tuple.second outs) ++ "TypeError: " ++ text ++ "\n"))
+                Ok typ ->   printValidateProg_ xs ((Tuple.first outs, (Tuple.second outs) ++ printType typ ++ " " ++ ( Tuple.first x) ++ " = " ++ printMathexpr (Tuple.second x) ++ "\n" ))
+            
+
+--validateProg_ xs outs  (validateAssign x)
 
  --- Basic parsing stuff ---
 
@@ -356,3 +356,28 @@ assign chars =
 
 printAssign assn = Tuple.first assn ++ " = " ++ printMathexpr (Tuple.second assn)
 validateAssign assn = validate (Tuple.second assn)
+
+compile prog = 
+    "segment .text\n"++
+    "global start\n"++
+    "start:\n"++
+    compile_mid prog ++
+    """    mov rax, 0x2000001 ;Exit (MacOS)
+    mov rdi, 0         ;Err code 69 (nice)
+    syscall
+print:
+    mov rax, #56
+    div rax, #10 ;Quo goes in RAX, rem goes in RDX
+    finish later
+
+segment .bss
+    charbuf resb 50
+"""
+
+compile_assn prog =
+    --Compile Mathexpr which calculates the value on the top of the stack
+    --"pop rax\n"++ --Get num
+    "mov rax, #56"
+    "div rax, #10\n"++ --Quo goes in RAX, Rem goes in RDX
+
+    
