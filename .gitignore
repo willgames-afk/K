@@ -10,3 +10,6 @@ index.html
 
 # Nodejs
 node_modules/
+
+#Build dependancies and results
+build/nasm-2.15.05
