@@ -1,11 +1,28 @@
-module Main exposing (..)
-
-import Browser
-import Html exposing (Html, button, div, textarea, text, br)
-import Html.Attributes exposing (readonly)
-import Html.Events exposing (onClick, onInput)
+module Main exposing (main)
 
 import List.Extra exposing (find)
+import Dict exposing (Dict)
+
+import Browser
+import Html exposing (Html, button, div, textarea, text, br, a)
+import Html.Attributes exposing (readonly, href, download)
+import Html.Events exposing (onClick, onInput)
+
+import Parse as P
+import Compile as C
+
+import Base64
+
+--Fold 2 lists at once (to the left)
+
+fold2l:(a -> b -> c -> c) -> c -> List a -> List b -> c
+fold2l func acc inputA inputB = case inputA of
+    [] -> acc
+    a :: axs -> case inputB of
+        [] -> acc
+        b :: bxs ->
+            fold2l func (func a b acc) axs bxs
+        
 
 
 --- Browser Stuff ---
@@ -14,16 +31,31 @@ main =
   Browser.sandbox { init = initialModel, update = update, view = view }
 
 initialModel = 
-    { input = ""
+    { input = """a = 10
+b = a + 10
+if (b > a) {
+    a = b
+} else {
+    b = a
+}
+
+"""
     , output = ""
+    , download = ""
     }
 
-view model =
-  div []
-    [ textarea [ onInput UpdateInput] [ text initialModel.input ]
-    , button   [ onClick Compile ]    [ text "Compile"]
-    , div      [ ]                    (List.intersperse (br [] []) (List.map text (String.lines model.output)))
-    ]
+view model = 
+    let 
+        mostOfIt = 
+            [ textarea [ onInput UpdateInput] [ text model.input ]
+            , button   [ onClick Compile ]    [ text "Compile"]
+            , div      [ ]                    (List.intersperse (br [] []) (List.map text (String.lines model.output)))
+            ]
+    in
+        div [] (if (String.length model.download > 0) then
+            List.append [(a [ href ("data:text/plain;base64," ++ (Base64.encode model.download)), download "prog.asm"] [text "Download Assembly"])] mostOfIt
+        else
+            mostOfIt)
 
 type Msg = Compile | UpdateInput String
 
@@ -32,352 +64,176 @@ update msg model =
     UpdateInput newInput ->  {model | input=newInput}
     Compile -> 
         let 
-            maybeParsed = parseProgram model.input
+            maybeParsed = P.parseProgram model.input
             result = case maybeParsed of
-                Success val _ -> let res = printValidateProg val in case Tuple.first res of 
-                    True -> (Tuple.second res) ++ compile val
-                    False -> Tuple.second res
-                Error val  -> "ParseError: " ++ (Tuple.first val) ++ " Around `" ++ (Tuple.second val) ++ "`"
+                P.Success val _ -> case validateProg val Dict.empty of 
+                    Ok typelist -> ("Valid!\n" ++ List.foldl printVres "" typelist ++ "\nMacOS Assembly:" ++ C.comp_x86_64_macos val, C.comp_x86_64_macos val)
+                    Err err -> (err, "")
+                P.Error val  -> ("ParseError: " ++ (Tuple.first val) ++ " Around `" ++ String.slice 0 30 (Tuple.second val) ++ "`","")
         in
-            {model | output = result}
-
-parseProgram: String -> MaybeParsed (List (String, MathExpr))
-parseProgram chars = parseProgram_ chars []
-parseProgram_ chars list =
-    case String.isEmpty (String.trimRight chars) of
-        True -> Success (List.reverse list) ""
-        False -> case assign chars of
-            Success res rem -> parseProgram_ rem (res :: list)
-            Error err -> Error err
-    
-
-printValidateProg:  List (String, MathExpr)  -> (Bool, String)
-printValidateProg input = printValidateProg_ input (True,"")
-printValidateProg_ input outs =
-    case input of
-        [] -> outs 
-        x :: xs -> let valAsn = validateAssign x in -- Result String or MType
-            case valAsn of
-                Err text -> printValidateProg_ xs ((False, (Tuple.second outs) ++ "TypeError: " ++ text ++ "\n"))
-                Ok typ ->   printValidateProg_ xs ((Tuple.first outs, (Tuple.second outs) ++ printType typ ++ " " ++ ( Tuple.first x) ++ " = " ++ printMathexpr (Tuple.second x) ++ "\n" ))
-            
-
---validateProg_ xs outs  (validateAssign x)
-
- --- Basic parsing stuff ---
-
-type MaybeParsed a 
-    = Success a      String   --Whatever we parsed and the rest of the input
-    | Error   (String, String) -- An error message, and the rest of the input
+            {model | output = Tuple.first result, download = Tuple.second result}
 
 
- -- Takes Function that returns true when the character is valid, and input string. Returns the parsed string and the remaining input
-parseWhile: (Char -> Bool) -> String -> (String, String)
-parseWhile func chars = parseWhile_ func (token chars) ""
-parseWhile_ func chars out = 
-    case String.uncons chars of 
-        Just res ->
-            if func (Tuple.first res) then
-                parseWhile_ func (Tuple.second res) (String.cons (Tuple.first res) out)
-            else 
-                (String.reverse out, chars)
-        Nothing -> (String.reverse out, chars)
+type ValidateRes 
+    = VAsnment String P.MType
+    | VIfelse (List ValidateRes) (List ValidateRes)
+    | VFunction String (List P.MType) P.MType
 
-lit: String -> String -> MaybeParsed String
-lit literal rawchars =
-    let chars = token rawchars in
-        if String.startsWith literal chars then
-            Success literal (String.dropLeft (String.length literal) chars)
-        else 
-            Error ("Expected `" ++ literal ++ "`", chars)
+type alias SymbolMap = Dict String P.MType
 
-token: String -> String
-token chars = String.trimLeft chars
+type alias VContext = 
+    { symbols: SymbolMap 
+    , result: Result String (List ValidateRes)
+    }
 
- --- Parsing! --
+printVres: ValidateRes -> String -> String
+printVres vres outstr= case vres of
+    VAsnment name typ -> outstr ++ name ++ ": " ++ P.printType typ ++ "\n"
+    VIfelse l1 l2 -> outstr ++ "If true {\n" ++ List.foldl printVres "" l1 ++ "\n}\nIf false {\n" ++ List.foldl printVres "" l2 ++ "\n}\n"
 
-number: String -> MaybeParsed Int
-number chars = 
-    let 
-        res = parseWhile Char.isDigit chars
-        maybeInt = String.toInt (Tuple.first res)
-    in 
-        case maybeInt of 
-            Just value -> Success value (Tuple.second res)
-            Nothing -> Error ("Expected Number!", Tuple.second res)
+validateProg:  List P.Line -> SymbolMap -> Result String (List ValidateRes) --Bool is whether its valid or not, string is type or error
+validateProg input symbols = (List.foldl validateProg_ {symbols=symbols, result= Ok []} input).result
 
-name: String -> MaybeParsed String
-name chars =
-    let 
-        res = parseWhile Char.isAlphaNum chars
-    in
-        if String.isEmpty (Tuple.first res) then 
-            Error ("Expected Name!", (Tuple.second res))
-        else
-            Success (Tuple.first res) (Tuple.second res)
+validateProg_: P.Line -> VContext -> VContext
+validateProg_ input context =  -- Result String or MType
+    case validateLine input context.symbols of
+        Err text -> {context | result = case context.result of 
+                        Err oldErr -> Err (oldErr ++ "TypeError: " ++ text ++ "\n")
+                        Ok _ -> Err ("TypeError: " ++ text ++ "\n")
+                    } 
+        Ok ln -> case ln of
+            VAsnment name typ -> {context | symbols = (Dict.insert name typ context.symbols)
+                                  , result = case context.result of
+                                        Ok prev -> Ok (prev ++ [ln])
+                                        Err err -> Err err
+                                  }
+            VIfelse _ _ -> {context | result = case context.result of
+                                  Ok prev -> Ok (prev ++ [ln])
+                                  Err err -> Err err
+                              }
+            VFunction name args return -> {context | symbols = (Dict.insert name (P.MFunc args return) context.symbols)
+                                          , result = case context.result of 
+                                                Ok prev -> Ok (prev ++ [ln])
+                                                Err err -> Err err
+                                          }
 
-bool: String -> MaybeParsed Bool
-bool chars =
-    case lit "true" chars of
-        Success _ rem -> Success True rem
-        Error _ ->
-            case lit "false" chars of
-                Success _ rem -> Success False rem
-                Error err -> Error ("Expected Boolean!", Tuple.second err)
-
-
-type MathExpr
-    = More MathExpr
-    | ValInt Int
-    | ValBool Bool
-    | MathOp Op MathExpr MathExpr
-
-type Op 
-    = Div | Mul | Mod
-    | Add | Sub 
-    | Shl | Shr
-    | Llt | Lle | Lgt | Lge
-    | Equ | Neq
-    | Band
-    | Bor
-    | Land
-    | Lor
-
-type MType
-    = MBool
-    | MInt
-    | MA Int -- Type variable- Int denotes which one
-
-printMathexpr: MathExpr -> String
-printMathexpr mxpr = 
-    case mxpr of 
-        More val -> "(" ++ (printMathexpr val ) ++ ")"
-        MathOp op expr1 expr2 -> "(" ++ (printMathexpr expr1) ++ (printOp op) ++ (printMathexpr expr2) ++ ")"
-        ValInt val -> String.fromInt val
-        ValBool val -> case val of
-            True -> "True"
-            False -> "False"
-
-printType: MType -> String
-printType t =
-    case t of
-        MBool -> "Bool"
-        MInt -> "Int"
-        MA num -> "Any (" ++ String.fromInt num ++ ")"
-
-printOp: Op -> String
-printOp t =
-    case t of
-        Mul  -> "Mul"
-        Div  -> "Div"
-        Mod  -> "Mod"
-        Add  -> "Add"
-        Sub  -> "Sub"
-        Shl  -> "Shl"
-        Shr  -> "Shr"
-        Llt  -> "Llt"
-        Lle  -> "Lle"
-        Lgt  -> "Lgt"
-        Lge  -> "Lge"
-        Equ  -> "Equ"
-        Neq  -> "Neq"
-        Band -> "Band"
-        Bor  -> "Bor"
-        Land -> "Land"
-        Lor  -> "Lor"
-    
-
-mathexpr: String -> MaybeParsed MathExpr
-mathexpr chars = 
-    case lit "(" chars of --Attempt to parse (
-        Success _ rem -> case infixexpr rem of --Attempt to parse subexpr
-            Success expr rem2 -> case lit ")" rem2 of -- Attempt to parse )
-                Success _ rem3 -> Success (More expr) rem3
-                Error err -> Error err -- There always has to be a closing parenth 
-            Error err -> Error err -- Parentheses must have content
-        Error _ -> case number chars of 
-            Success num rem4 -> Success (ValInt num) rem4
-            Error _ -> case bool chars of
-                Success val rem5 -> Success (ValBool val) rem5
-                Error err -> Error ("Expected Mathexpr", Tuple.second err)
-
-
--- List of op tuples grouped by precedence (Later means more parethesisy)
--- op tuples contain one of the types in the Op Union and the string which represents that op.
-math = 
-    [ (False,
-      [ (Lor, "or")
-      ])
-    , (False,
-      [ (Land, "and")
-      ])
-    , (False,
-      [ (Bor, "|")
-      ])
-    , (False,
-      [ (Band, "&")
-      ])
-    , (False,
-      [ (Equ, "==")
-      , (Neq, "!=")
-      ])
-    , (False,
-      [ (Llt, "<")
-      , (Lle, "<=")
-      , (Lgt, ">")
-      , (Lge, ">=")
-      ])
-    , (False,
-      [ (Shl, "<<")
-      , (Shr, ">>")
-      ])
-    , (False,
-      [ (Add, "+")
-      , (Sub, "-")
-      ])
-    , (False,
-      [ (Div, "/")
-      , (Mul, "*")
-      , (Mod, "%")
-      ])
-    ]
-
-sigs = 
-    [ (Lor, ((MBool, MBool), MBool))
-    , (Land, ((MBool, MBool), MBool))
-    , (Bor, ((MInt, MInt), MInt))
-    , (Band, ((MInt, MInt), MInt))
-    , (Equ, ((MA 1, MA 1), MBool))
-    , (Neq, ((MA 1, MA 1), MBool))
-    , (Llt, ((MInt, MInt), MBool))
-    , (Lle, ((MInt, MInt), MBool))
-    , (Lgt, ((MInt, MInt), MBool))
-    , (Lge, ((MInt, MInt), MBool))
-    , (Shl, ((MInt, MInt), MInt))
-    , (Shr, ((MInt, MInt), MInt))
-    , (Add, ((MInt, MInt), MInt))
-    , (Sub, ((MInt, MInt), MInt))
-    , (Div, ((MInt, MInt), MInt))
-    , (Mul, ((MInt, MInt), MInt))
-    , (Mod, ((MInt, MInt), MInt))
-    ]
-
-infixexpr: String -> MaybeParsed MathExpr
-infixexpr chars = infixexpr_ math chars
-
-
--- Parses a term, and calls infixexpr_next
--- A term is either an operator from the next highest precedence, or a number
-infixexpr_: List (Bool ,(List (Op, String))) -> String -> MaybeParsed MathExpr
-infixexpr_ levels chars = 
-    case levels of
-        [] -> mathexpr chars -- If we're out of math levels, parse a mathexpr
-        level :: rest -> 
-            case infixexpr_ rest chars of -- Parse a Term
-                Error err -> Error err      -- We need this term, let error fall thru
-                Success term1 rem -> infixexpr_next term1 level rest rem
-
--- Parses as many op-term pairs as it can
-infixexpr_next: MathExpr -> (Bool, List (Op,String)) -> List( (Bool, List (Op,String))) -> String -> MaybeParsed MathExpr
-infixexpr_next term1 level tail chars =
-    case infixop (Tuple.second level) chars of  -- Parse an Op
-        Error _ -> Success term1 chars --If it fails, just return term1
-        Success op rem ->
-            case  infixexpr_ tail rem of  -- Parse a term
-                Error err -> Error err
-                Success term2 rem2 ->
-                    case (Tuple.first level) of
-                        False -> infixexpr_next (MathOp op term1 term2 ) level tail rem2  --Attempt to recursively parse another op-term pair
-                        True -> let rterm2 = infixexpr_next term2 level tail rem2 in
-                            case rterm2 of
-                                Success val rem3 -> Success (MathOp op term1 val) rem3
-                                Error err -> Error err
-
-
--- Attempts to parse any operator in the current precedence level
-infixop: List (Op, String) -> String -> MaybeParsed Op
-infixop levels chars =
-    case levels of 
-        [] -> Error ("Expected Infix Operator", chars)
-        val :: rest ->
-            case lit ( Tuple.second val) chars of --Try to parse op
-                Success _ rem -> Success (Tuple.first val) rem
-                Error _ -> infixop rest chars -- Try to parse next op
 
  ---- VALIDATORS ----
-validate: MathExpr -> Result String MType
-validate mxpr = 
-    case mxpr of 
-        More smxpr -> validate smxpr
-        ValBool _ -> Ok MBool
-        ValInt _ -> Ok MInt
-        MathOp op t1 t2 -> 
+
+validateLine: P.Line -> SymbolMap -> Result String ValidateRes
+validateLine line symbols = case line of
+    P.Asnment name mxpr -> case validate mxpr symbols of
+        Ok typ -> Ok (VAsnment name typ)
+        Err err -> Err err
+    P.Ifelse cond tru fals-> validateIfelse cond tru fals symbols
+    P.FunctionDef name args block -> 
+        let 
+            dummyArgTypes = Dict.fromList (List.map2 (\n typnum->(n, P.MA typ)) args (List.range 0 ((List.length args) - 1)))
+            funcs = Dict.filter (\_ val->case val of
+                P.MFunc _ -> True
+                _ -> False)
+
+            vBlock = (List.foldl validateProg_ {symbols=Dict.union dummyArgTypes funcs, result=Ok []} block)
+            exprs = raw.output
+            bSymbols = raw.symbols
+            argTypes = Dict.filter
+        in
+            VFunction name argTypes exprs
+
+
+checkFuncArgTypes: SymbolMap -> String -> Result String (List P.MType)-> Result String (List P.MType)
+checkFuncArgTypes symbols argname out = case out of
+    Err _ -> out
+    Ok l -> case Dict.get argname symbols of
+        Nothing -> Err "Argument has dissapeared- Error with compiler" --Should be impossible as the args are added to this list
+        Just a -> Ok (l ++ [a])
+            
+
+validateIfelse cond tru fals symbols = case validate cond symbols of
+    Err err -> Err err
+    Ok typ -> 
+        if typ /= P.MBool then 
+            Err "If condition must return a boolean"
+        else
             let 
-                sig = find (\a -> (Tuple.first a) == op) sigs
+                vtru = validateProg tru symbols
+                vfals = validateProg fals symbols
+            in
+                case vtru of 
+                    Err err2 -> Err err2
+                    Ok vvtru -> case vfals of
+                        Err err3 -> Err err3
+                        Ok vvfals -> Ok (VIfelse vvtru vvfals)
+
+validate: P.MathExpr -> SymbolMap -> Result String P.MType --Validates Mathexprs.
+validate mxpr symbols = 
+    case mxpr of 
+        P.ValBool _ -> Ok P.MBool
+        P.ValInt _ -> Ok P.MInt
+        P.MathOp op t1 t2 -> 
+            let 
+                sig = find (\a -> (Tuple.first a) == op) P.sigs --Fix this so it always succeds- 
             in case sig of
-                Nothing -> Err "Invalid operator, or op signature is missing!"
+                Nothing -> Err "Invalid operator, or op signature is missing- Issue with the Compiler!!!"
                 Just (_,((a,b),c)) ->
                     let 
-                        vt1res = validate t1
-                        vt2res = validate t2
+                        vt1res = validate t1 symbols
+                        vt2res = validate t2 symbols
                     in case vt1res of 
                      Err e -> Err e
                      Ok vt1 -> case vt2res of
                       Err e -> Err e
                       Ok vt2 ->
                         let 
+                            vt1_ = case vt1 of
+                                P.MA _ -> a
+                                _ -> vt1
+                            vt2_ = case vt2 of
+                                P.MA _ -> b
+                                _ -> vt2
                             a_ = case a of 
-                                MA _ -> vt1 
+                                P.MA _ -> vt1 
                                 _ -> a
                             b_ = case b of 
-                                MA bnum -> case a of
-                                    MA anum -> if anum == bnum then a_ else b
+                                P.MA bnum -> case a of
+                                    P.MA anum -> if anum == bnum then a_ else b
                                     _ -> b
                                 _ -> b
                         in
                           if (a_ == vt1 && b_ == vt2) then
                               Ok c
                           else
-                              Err ("Invalid params for Op `" ++ printOp op ++ "`- Expected " ++ printType a_ ++ " and " ++ printType b_ ++ " but got " ++ printType vt1 ++ " and " ++ printType vt2 ++ ".")
+                              Err ("Invalid params for Op `" ++ P.printOp op 
+                                ++ "`- Expected " ++ P.printType a_ ++ " and " ++ P.printType b_ 
+                                ++ " but got " ++ P.printType vt1 ++ " and " ++ P.printType vt2 ++ ".")
+        P.Name name -> case Dict.get name symbols of 
+            Nothing -> Err ("Variable `" ++ name ++ "` not found")
+            Just vartype -> case vartype of 
+                P.MFunc _ _ -> Err ("`" ++ name ++ "` is not a variable (type is "++ P.printType vartype ++ ")")
+                _ -> Ok vartype
+        P.FuncCall name args -> case Dict.get name symbols of
+            Nothing -> Err ("Function `" ++ name ++ "` not found")
+            Just functype -> case functype of
+                P.MFunc argTs returnT -> 
+                    if List.length args /= List.length argTs then
+                        Err ("Incorrect number of function arguments- Expected " ++ String.fromInt (List.length argTs) ++ " but got " ++ String.fromInt (List.length args))
+                    else
+                        let results = List.map2 (\arg typ -> case validate arg symbols of
+                                                    Err e -> Err e 
+                                                    Ok argtype -> 
+                                                        if typ == argtype then
+                                                            Ok argtype
+                                                        else
+                                                            Err ("Expected argument of type `" ++ P.printType typ ++ "` but got `" ++ P.printType argtype ++ "` instead")
+                                                ) args argTs in
+                            case List.foldl (\arg acc-> case arg of
+                                                Err a -> Err a
+                                                _ -> acc
+                                            ) (Ok 0) results of
+                                Ok _ -> Ok returnT
+                                Err err -> Err err
 
-
-assign: String -> MaybeParsed (String, MathExpr)
-assign chars = 
-    let mname = name chars in
-        case mname of 
-            Error err -> Error err
-            Success cname rem -> 
-                case lit "=" rem of
-                    Error _ -> Error ("Expected `=`",rem)
-                    Success _ rem2 ->let mexpr = infixexpr rem2 in
-                        case mexpr of
-                            Error err -> Error err
-                            Success cexpr rem3 -> Success (cname, cexpr) rem3
-
-printAssign assn = Tuple.first assn ++ " = " ++ printMathexpr (Tuple.second assn)
-validateAssign assn = validate (Tuple.second assn)
-
-compile prog = 
-    "segment .text\n"++
-    "global start\n"++
-    "start:\n"++
-    compile_mid prog ++
-    """    mov rax, 0x2000001 ;Exit (MacOS)
-    mov rdi, 0         ;Err code 69 (nice)
-    syscall
-print:
-    mov rax, #56
-    div rax, #10 ;Quo goes in RAX, rem goes in RDX
-    finish later
-
-segment .bss
-    charbuf resb 50
-"""
-
-compile_assn prog =
-    --Compile Mathexpr which calculates the value on the top of the stack
-    --"pop rax\n"++ --Get num
-    "mov rax, #56"
-    "div rax, #10\n"++ --Quo goes in RAX, Rem goes in RDX
-
+                _ -> Err ("`" ++ name ++ "` is not a function (type is " ++ P.printType functype ++ ")")
     
+
+internErr = "Internal Error- Some condition that was supposed to be unreachable has been reached, contact the developer"

@@ -1,13 +1,4 @@
-const express = require('express')
-const app = express()
-const port = 3000
+const r = require('child_process');
 
-app.get('/', (req, res) => {
-  res.sendFile(__dirname+'/index.html')
-})
-app.get('/main.js', (req, res) => {
-  res.sendFile(__dirname+'/main.js')
-})
-app.listen(port, () => {
-  console.log(`Test Server listening at http://localhost:${port}`)
-})
+r.exec("./elm make src/Main.elm --output=compiler.js")
+const code = require("./compiler.js")
