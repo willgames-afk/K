@@ -6,7 +6,7 @@ import List exposing (map, foldl)
 --- PARSING BASICS ---
 
 type MaybeParsed a 
-    = Success a      String   --Whatever we parsed and the rest of the input
+    = Success a  String   --Whatever we parsed and the rest of the input
     | Error   (String, String) -- An error message, and the rest of the input- used for error locating
 
  -- Takes Function that returns true when the character is valid, and input string. Returns the parsed string and the remaining input

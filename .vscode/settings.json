@@ -1,4 +1,5 @@
 {
-	"elm.compiler": "./node_modules/.bin/elm",
-	"elm.makeCommand": "./node_modules/.bin/elm-make"
+	
+	"elmLS.elmPath": "./elm",
+	"elmLS.disableElmLSDiagnostics" : true
 }

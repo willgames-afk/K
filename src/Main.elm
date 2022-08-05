@@ -1,64 +1,48 @@
-module Main exposing (main)
+port module Main exposing (main)
 
 import List.Extra exposing (find)
 import Dict exposing (Dict)
 
 import Browser
-import Html exposing (Html, button, div, textarea, text, br, a)
+{-import Html exposing (Html, button, div, textarea, text, br, a)
 import Html.Attributes exposing (readonly, href, download)
-import Html.Events exposing (onClick, onInput)
-
+import Html.Events exposing (onClick, onInput)-}
 import Parse as P
 import Compile as C
+import Platform exposing (worker)
 
-import Base64
+internErr = "Internal Error- Some condition that was supposed to be unreachable has been reached, contact the developer"
 
 --Fold 2 lists at once (to the left)
 
-fold2l:(a -> b -> c -> c) -> c -> List a -> List b -> c
+{-fold2l:(a -> b -> c -> c) -> c -> List a -> List b -> c
 fold2l func acc inputA inputB = case inputA of
     [] -> acc
     a :: axs -> case inputB of
         [] -> acc
         b :: bxs ->
-            fold2l func (func a b acc) axs bxs
+            fold2l func (func a b acc) axs bxs-}
         
 
 
 --- Browser Stuff ---
 
-main =
-  Browser.sandbox { init = initialModel, update = update, view = view }
+main = worker {init= init, update=update, subscriptions=subscriptions}
 
-initialModel = 
-    { input = """a = 10
-b = a + 10
-if (b > a) {
-    a = b
-} else {
-    b = a
-}
+port sendMessage     : String -> Cmd msg
 
-"""
+init : String -> Model
+init input = 
+    { input = input
     , output = ""
-    , download = ""
     }
+subscriptions : Model -> Sub Msg
+subscriptions _ = Sub.none
 
-view model = 
-    let 
-        mostOfIt = 
-            [ textarea [ onInput UpdateInput] [ text model.input ]
-            , button   [ onClick Compile ]    [ text "Compile"]
-            , div      [ ]                    (List.intersperse (br [] []) (List.map text (String.lines model.output)))
-            ]
-    in
-        div [] (if (String.length model.download > 0) then
-            List.append [(a [ href ("data:text/plain;base64," ++ (Base64.encode model.download)), download "prog.asm"] [text "Download Assembly"])] mostOfIt
-        else
-            mostOfIt)
+type       Msg = Compile | UpdateInput String
+type alias Model = {input: String, output: String}
 
-type Msg = Compile | UpdateInput String
-
+update : Msg -> Model -> Model
 update msg model =
   case msg of
     UpdateInput newInput ->  {model | input=newInput}
@@ -74,24 +58,24 @@ update msg model =
             {model | output = Tuple.first result, download = Tuple.second result}
 
 
-type ValidateRes 
+type VStatement 
     = VAsnment String P.MType
-    | VIfelse (List ValidateRes) (List ValidateRes)
+    | VIfelse (List VStatement) (List VStatement)
     | VFunction String (List P.MType) P.MType
 
 type alias SymbolMap = Dict String P.MType
 
 type alias VContext = 
     { symbols: SymbolMap 
-    , result: Result String (List ValidateRes)
+    , result: Result String (List VStatement)
     }
 
-printVres: ValidateRes -> String -> String
+printVres: VStatement -> String -> String
 printVres vres outstr= case vres of
     VAsnment name typ -> outstr ++ name ++ ": " ++ P.printType typ ++ "\n"
     VIfelse l1 l2 -> outstr ++ "If true {\n" ++ List.foldl printVres "" l1 ++ "\n}\nIf false {\n" ++ List.foldl printVres "" l2 ++ "\n}\n"
 
-validateProg:  List P.Line -> SymbolMap -> Result String (List ValidateRes) --Bool is whether its valid or not, string is type or error
+validateProg:  List P.Line -> SymbolMap -> Result String (List VStatement) --Bool is whether its valid or not, string is type or error
 validateProg input symbols = (List.foldl validateProg_ {symbols=symbols, result= Ok []} input).result
 
 validateProg_: P.Line -> VContext -> VContext
@@ -120,7 +104,7 @@ validateProg_ input context =  -- Result String or MType
 
  ---- VALIDATORS ----
 
-validateLine: P.Line -> SymbolMap -> Result String ValidateRes
+validateLine: P.Line -> SymbolMap -> Result String VStatement
 validateLine line symbols = case line of
     P.Asnment name mxpr -> case validate mxpr symbols of
         Ok typ -> Ok (VAsnment name typ)
@@ -234,6 +218,3 @@ validate mxpr symbols =
                                 Err err -> Err err
 
                 _ -> Err ("`" ++ name ++ "` is not a function (type is " ++ P.printType functype ++ ")")
-    
-
-internErr = "Internal Error- Some condition that was supposed to be unreachable has been reached, contact the developer"

@@ -1,4 +1,9 @@
 const r = require('child_process');
 
-r.exec("./elm make src/Main.elm --output=compiler.js")
-const code = require("./compiler.js")
+const options = {
+	stdio: "inherit"
+}
+const thing = r.spawn("./elm",  ["make","src/Main.elm","--output=compiler.js"],options)
+thing.on('close',(code)=> {
+	console.log(`Exited with code ${code}`)
+})
